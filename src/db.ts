@@ -32,7 +32,7 @@ export type LibraryItemRow = {
   path: string | null;
 };
 
-export type RequestStatus = "pending" | "processing" | "available" | "failed";
+export type RequestStatus = "pending" | "processing" | "available" | "failed" | "cancelled";
 
 export type RequestRow = {
   id: string;

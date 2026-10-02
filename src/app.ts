@@ -36,7 +36,7 @@ import {
   syncLibrary,
 } from "./jellyfin";
 import { lidarrOptions, testLidarr } from "./lidarr";
-import { buildSearch, createRequest, retryRequest, toRequestJson } from "./request-service";
+import { buildSearch, cancelRequest, createRequest, retryRequest, toRequestJson } from "./request-service";
 
 function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<void>) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -364,9 +364,28 @@ export function createApp() {
     "/api/requests/:id/retry",
     requireReady,
     requireUser,
-    requireAdmin,
     asyncRoute(async (req, res) => {
+      const existing = getRequest(req.params.id);
+      if (!existing || (req.user!.is_admin !== 1 && existing.user_id !== req.user!.id)) {
+        res.status(404).json({ error: "Request not found." });
+        return;
+      }
       const row = await retryRequest(req.params.id);
+      res.json(toRequestJson(row));
+    }),
+  );
+
+  app.post(
+    "/api/requests/:id/cancel",
+    requireReady,
+    requireUser,
+    asyncRoute(async (req, res) => {
+      const existing = getRequest(req.params.id);
+      if (!existing || (req.user!.is_admin !== 1 && existing.user_id !== req.user!.id)) {
+        res.status(404).json({ error: "Request not found." });
+        return;
+      }
+      const row = await cancelRequest(req.params.id);
       res.json(toRequestJson(row));
     }),
   );

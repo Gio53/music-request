@@ -45,14 +45,25 @@ function runCommand(
   args: string[],
   timeoutMs: number,
   onText?: (chunk: string) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ServiceError("youtube", "Cancelled."));
+      return;
+    }
     const child = spawn(command, args, { windowsHide: true });
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill();
       reject(new ServiceError("youtube", `${command} took too long and was stopped.`));
     }, timeoutMs);
+    const stop = () => child.kill();
+    signal?.addEventListener("abort", stop);
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
+    };
     child.stdout.on("data", (chunk: Buffer) => onText?.(chunk.toString()));
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
@@ -60,7 +71,11 @@ function runCommand(
       onText?.(text);
     });
     child.on("error", (error: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
+      finish();
+      if (signal?.aborted) {
+        reject(new ServiceError("youtube", "Cancelled."));
+        return;
+      }
       if (error.code === "ENOENT") {
         reject(
           new ServiceError(
@@ -75,7 +90,11 @@ function runCommand(
       reject(new ServiceError("youtube", error.message));
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      finish();
+      if (signal?.aborted) {
+        reject(new ServiceError("youtube", "Cancelled."));
+        return;
+      }
       if (code === 0) {
         resolve();
         return;
@@ -92,6 +111,7 @@ export async function downloadTrack(input: {
   album: string;
   position?: number;
   onProgress?: (percent: number) => void;
+  signal?: AbortSignal;
 }): Promise<"downloaded" | "exists"> {
   const root = downloadRoot();
   const artist = safeSegment(input.artist);
@@ -133,11 +153,12 @@ export async function downloadTrack(input: {
       query,
     ],
     180000,
-    (chunk) => {
+      (chunk) => {
       const match = chunk.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
       if (!match) return;
       input.onProgress?.(Math.max(0, Math.min(100, Number(match[1]))));
     },
+    input.signal,
   );
 
   const downloadedName = fs.readdirSync(directory).find((name) => name.startsWith(`${tempStem}.`));
@@ -166,9 +187,16 @@ export async function downloadTrack(input: {
         finalPath,
       ],
       60000,
+      undefined,
+      input.signal,
     );
     tagged = fs.existsSync(finalPath);
-  } catch {
+  } catch (error) {
+    if (input.signal?.aborted) {
+      if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+      if (fs.existsSync(downloadedPath)) fs.unlinkSync(downloadedPath);
+      throw error;
+    }
     tagged = false;
     if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
   }

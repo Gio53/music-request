@@ -39,7 +39,7 @@ export type MusicRequest = {
   type: "album" | "artist" | "song";
   artist: string;
   album: string | null;
-  status: "pending" | "processing" | "available" | "failed";
+  status: "pending" | "processing" | "available" | "failed" | "cancelled";
   requester: string;
   createdAt: string;
   availableAt?: string | null;

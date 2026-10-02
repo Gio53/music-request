@@ -41,6 +41,21 @@ export type AlbumTarget = {
 };
 
 const running = new Set<string>();
+const stopRequested = new Set<string>();
+const activeDownloads = new Map<string, AbortController>();
+
+function downloadSignal(id: string): AbortSignal {
+  const controller = new AbortController();
+  activeDownloads.set(id, controller);
+  if (stopRequested.has(id)) controller.abort();
+  return controller.signal;
+}
+
+function throwIfCancelled(id: string) {
+  if (stopRequested.has(id)) {
+    throw new ServiceError("youtube", "Cancelled.");
+  }
+}
 
 export function toRequestJson(row: RequestRow) {
   return {
@@ -280,33 +295,46 @@ async function resolveIdentity(body: CreateBody): Promise<{
 export async function processRequest(id: string) {
   if (running.has(id)) return;
   running.add(id);
+  const signal = downloadSignal(id);
   try {
     const row = getRequest(id);
-    if (!row || row.status === "available") return;
+    if (!row || row.status === "available" || row.status === "cancelled" || stopRequested.has(id)) return;
     updateRequest(id, { status: "processing", error: null, progress: 5, progressLabel: "Starting" });
-    if (row.type === "song") await processSong(row);
-    else if (row.type === "album") await processAlbumOrYoutube(row);
+    if (stopRequested.has(id)) {
+      updateRequest(id, { status: "cancelled", error: null, progressLabel: "Cancelled" });
+      return;
+    }
+    if (row.type === "song") await processSong(row, signal);
+    else if (row.type === "album") await processAlbumOrYoutube(row, signal);
     else await processArtist(row);
   } catch (error) {
+    if (stopRequested.has(id) || signal.aborted) {
+      updateRequest(id, { status: "cancelled", error: null, progressLabel: "Cancelled" });
+      return;
+    }
     const message =
       error instanceof ServiceError || error instanceof HttpError
         ? error.message
         : "The request could not be sent to Lidarr.";
     updateRequest(id, { status: "failed", error: message, progressLabel: "Failed" });
   } finally {
+    activeDownloads.delete(id);
     running.delete(id);
   }
 }
 
-async function processSong(row: RequestRow) {
+async function processSong(row: RequestRow, signal: AbortSignal) {
   if (!row.album) throw new HttpError(400, "A song request needs a title.");
+  throwIfCancelled(row.id);
   reportProgress(row.id, 8, "Searching YouTube");
   await downloadTrack({
     artist: row.artist,
     title: row.album,
     album: "Singles",
+    signal,
     onProgress: (percent) => reportProgress(row.id, 10 + percent * 0.85, `Downloading ${Math.round(percent)}%`),
   });
+  throwIfCancelled(row.id);
   updateRequest(row.id, {
     status: "available",
     availableAt: new Date().toISOString(),
@@ -317,7 +345,7 @@ async function processSong(row: RequestRow) {
   void refreshAfterImport();
 }
 
-async function processAlbumOrYoutube(row: RequestRow) {
+async function processAlbumOrYoutube(row: RequestRow, signal: AbortSignal) {
   try {
     await processAlbum(row);
   } catch (error) {
@@ -330,6 +358,7 @@ async function processAlbumOrYoutube(row: RequestRow) {
         album: row.album || "",
         musicbrainzAlbumId: row.musicbrainz_album_id,
         lidarrAlbumId: row.lidarr_album_id,
+        signal,
       });
       updateRequest(row.id, {
         status: "available",
@@ -361,6 +390,7 @@ async function processAlbum(row: RequestRow) {
       `Lidarr did not return "${row.album}" for ${row.artist}. Try again in a minute.`,
     );
   }
+  throwIfCancelled(row.id);
   await monitorAlbums([album.id]);
   await searchAlbums([album.id]);
   updateRequest(row.id, {
@@ -392,6 +422,7 @@ async function processArtist(row: RequestRow) {
   if (missing.length === 0) {
     throw new HttpError(409, "Already in library");
   }
+  throwIfCancelled(row.id);
   const ids = missing.map((album) => album.id).filter((albumId) => albumId > 0);
   await monitorAlbums(ids);
   await searchAlbums(ids);
@@ -414,7 +445,7 @@ async function processArtist(row: RequestRow) {
 
 export async function checkRequest(id: string): Promise<boolean> {
   const row = getRequest(id);
-  if (!row || row.status === "available" || row.status === "failed" || row.status === "pending") {
+  if (!row || row.status === "available" || row.status === "failed" || row.status === "pending" || row.status === "cancelled") {
     return false;
   }
   let targets = parseTargets(row.targets_json);
@@ -479,12 +510,14 @@ async function youtubeFailedTargets(row: RequestRow, targets: AlbumTarget[]): Pr
     }
     if (!failed) continue;
     try {
+      throwIfCancelled(row.id);
       const note = await saveAlbumFromYoutube({
         requestId: row.id,
         artist: row.artist,
         album: target.title,
         musicbrainzAlbumId: target.musicbrainzAlbumId,
         lidarrAlbumId: target.lidarrAlbumId,
+        signal: activeDownloads.get(row.id)?.signal,
       });
       target.saved = true;
       target.youtube = true;
@@ -525,6 +558,7 @@ async function saveAlbumFromYoutube(input: {
   album: string;
   musicbrainzAlbumId?: string | null;
   lidarrAlbumId?: number | null;
+  signal?: AbortSignal;
 }): Promise<string | null> {
   if (input.requestId) reportProgress(input.requestId, 40, "Looking up tracks");
   const tracks = (await trackList(input)).slice(0, 40);
@@ -540,12 +574,16 @@ async function saveAlbumFromYoutube(input: {
     const track = tracks[index];
     const span = 55 / tracks.length;
     const base = 40 + index * span;
+    if (input.signal?.aborted || (input.requestId && stopRequested.has(input.requestId))) {
+      throw new ServiceError("youtube", "Cancelled.");
+    }
     try {
       await downloadTrack({
         artist: input.artist,
         title: track.title,
         album: input.album,
         position: track.position,
+        signal: input.signal,
         onProgress: (percent) => {
           if (!input.requestId) return;
           reportProgress(
@@ -665,7 +703,23 @@ function coverUrl(album: LidarrAlbum): string | null {
 export async function retryRequest(id: string) {
   const row = getRequest(id);
   if (!row) throw new HttpError(404, "Request not found.");
+  if (row.status !== "failed" && row.status !== "cancelled") {
+    throw new HttpError(400, "Only a failed or cancelled request can be retried.");
+  }
+  stopRequested.delete(id);
   updateRequest(id, { status: "pending", error: null, progress: 0, progressLabel: "Waiting" });
   void processRequest(id);
+  return getRequest(id)!;
+}
+
+export async function cancelRequest(id: string) {
+  const row = getRequest(id);
+  if (!row) throw new HttpError(404, "Request not found.");
+  if (row.status === "available") {
+    throw new HttpError(400, "This request already finished.");
+  }
+  stopRequested.add(id);
+  activeDownloads.get(id)?.abort();
+  updateRequest(id, { status: "cancelled", error: null, progressLabel: "Cancelled" });
   return getRequest(id)!;
 }
