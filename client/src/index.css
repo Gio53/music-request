@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --text: #0f172a;
+  --muted: #475569;
+  --border: #e2e8f0;
+  --primary: #6d28d9;
+  --primary-hover: #5b21b6;
+  --on-primary: #ffffff;
+  --accent: #b45309;
+  --on-accent: #fffbeb;
+  --success: #047857;
+  --success-bg: #ecfdf5;
+  --warning: #b45309;
+  --warning-bg: #fffbeb;
+  --danger: #b91c1c;
+  --danger-bg: #fef2f2;
+  --info: #1d4ed8;
+  --info-bg: #eff6ff;
+  --ring: #6d28d9;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #020617;
+    --surface: #0f172a;
+    --surface-2: #1e293b;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --border: #334155;
+    --primary: #8b5cf6;
+    --primary-hover: #7c3aed;
+    --on-primary: #ffffff;
+    --accent: #fbbf24;
+    --on-accent: #1c1917;
+    --success: #6ee7b7;
+    --success-bg: #022c22;
+    --warning: #fcd34d;
+    --warning-bg: #451a03;
+    --danger: #fca5a5;
+    --danger-bg: #450a0a;
+    --info: #93c5fd;
+    --info-bg: #172554;
+    --ring: #c4b5fd;
+  }
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+button,
+a,
+input,
+select {
+  transition: background-color 200ms ease-out, color 200ms ease-out, border-color 200ms ease-out,
+    transform 150ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button,
+  a,
+  input,
+  select {
+    transition: none;
+  }
+}

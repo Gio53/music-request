@@ -1,0 +1,8 @@
+services:
+  music-request:
+    build: .
+    ports:
+      - "5656:5656"
+    volumes:
+      - ./config:/app/config
+    restart: unless-stopped
