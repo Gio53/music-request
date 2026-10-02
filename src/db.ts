@@ -51,6 +51,8 @@ export type RequestRow = {
   created_at: string;
   available_at: string | null;
   targets_json: string | null;
+  progress: number;
+  progress_label: string | null;
   requester: string;
 };
 
@@ -128,6 +130,14 @@ function migrate(database: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_requests_user ON requests(user_id);
     CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
   `);
+
+  const requestColumns = database.prepare("PRAGMA table_info(requests)").all() as Array<{ name: string }>;
+  if (!requestColumns.some((column) => column.name === "progress")) {
+    database.exec("ALTER TABLE requests ADD COLUMN progress INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!requestColumns.some((column) => column.name === "progress_label")) {
+    database.exec("ALTER TABLE requests ADD COLUMN progress_label TEXT");
+  }
 
   if (!getSetting("cookie_secret")) {
     setSetting("cookie_secret", crypto.randomBytes(32).toString("hex"));
@@ -450,6 +460,8 @@ export function updateRequest(
     album: string | null;
     musicbrainzAlbumId: string | null;
     musicbrainzArtistId: string | null;
+    progress: number;
+    progressLabel: string | null;
   }>,
 ) {
   const current = getRequest(id);
@@ -466,7 +478,9 @@ export function updateRequest(
         artist = ?,
         album = ?,
         musicbrainz_album_id = ?,
-        musicbrainz_artist_id = ?
+        musicbrainz_artist_id = ?,
+        progress = ?,
+        progress_label = ?
       WHERE id = ?`,
     )
     .run(
@@ -482,6 +496,8 @@ export function updateRequest(
       patch.musicbrainzArtistId === undefined
         ? current.musicbrainz_artist_id
         : patch.musicbrainzArtistId,
+      patch.progress === undefined ? current.progress || 0 : patch.progress,
+      patch.progressLabel === undefined ? current.progress_label : patch.progressLabel,
       id,
     );
 }

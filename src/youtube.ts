@@ -40,7 +40,12 @@ function oneLine(value: string): string {
   return value.replace(/[\r\n\u0000]/g, " ").trim();
 }
 
-function runCommand(command: string, args: string[], timeoutMs: number): Promise<void> {
+function runCommand(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  onText?: (chunk: string) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { windowsHide: true });
     let stderr = "";
@@ -48,8 +53,11 @@ function runCommand(command: string, args: string[], timeoutMs: number): Promise
       child.kill();
       reject(new ServiceError("youtube", `${command} took too long and was stopped.`));
     }, timeoutMs);
+    child.stdout.on("data", (chunk: Buffer) => onText?.(chunk.toString()));
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr = (stderr + chunk.toString()).slice(-1500);
+      const text = chunk.toString();
+      stderr = (stderr + text).slice(-1500);
+      onText?.(text);
     });
     child.on("error", (error: NodeJS.ErrnoException) => {
       clearTimeout(timer);
@@ -83,6 +91,7 @@ export async function downloadTrack(input: {
   title: string;
   album: string;
   position?: number;
+  onProgress?: (percent: number) => void;
 }): Promise<"downloaded" | "exists"> {
   const root = downloadRoot();
   const artist = safeSegment(input.artist);
@@ -94,7 +103,10 @@ export async function downloadTrack(input: {
   const directory = path.join(root, artist, album);
   const finalPath = path.join(directory, fileName);
   assertInside(root, finalPath);
-  if (fs.existsSync(finalPath)) return "exists";
+  if (fs.existsSync(finalPath)) {
+    input.onProgress?.(100);
+    return "exists";
+  }
 
   fs.mkdirSync(directory, { recursive: true });
   const tempStem = `.mr-${crypto.randomBytes(4).toString("hex")}`;
@@ -104,6 +116,7 @@ export async function downloadTrack(input: {
   await runCommand(
     process.env.YT_DLP_PATH || "yt-dlp",
     [
+      "--newline",
       "--no-playlist",
       "--no-warnings",
       "--max-downloads",
@@ -120,6 +133,11 @@ export async function downloadTrack(input: {
       query,
     ],
     180000,
+    (chunk) => {
+      const match = chunk.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+      if (!match) return;
+      input.onProgress?.(Math.max(0, Math.min(100, Number(match[1]))));
+    },
   );
 
   const downloadedName = fs.readdirSync(directory).find((name) => name.startsWith(`${tempStem}.`));

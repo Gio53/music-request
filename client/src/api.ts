@@ -44,6 +44,8 @@ export type MusicRequest = {
   createdAt: string;
   availableAt?: string | null;
   error?: string | null;
+  progress?: number;
+  progressLabel?: string | null;
 };
 
 export type SearchArtist = {

@@ -60,7 +60,28 @@ export function toRequestJson(row: RequestRow) {
     lidarrAlbumId: row.lidarr_album_id,
     lidarrArtistId: row.lidarr_artist_id,
     targets: parseTargets(row.targets_json),
+    progress: row.status === "available" ? 100 : row.progress || 0,
+    progressLabel:
+      row.progress_label ||
+      (row.status === "available"
+        ? "Done"
+        : row.status === "failed"
+          ? "Failed"
+          : row.status === "pending"
+            ? "Waiting"
+            : "Working"),
   };
+}
+
+const lastProgressWrite = new Map<string, number>();
+
+function reportProgress(id: string, progress: number, progressLabel: string) {
+  const rounded = Math.max(0, Math.min(100, Math.round(progress)));
+  const now = Date.now();
+  const previous = lastProgressWrite.get(id) || 0;
+  if (rounded < 100 && now - previous < 500) return;
+  lastProgressWrite.set(id, now);
+  updateRequest(id, { progress: rounded, progressLabel });
 }
 
 function parseTargets(raw: string | null): AlbumTarget[] {
@@ -122,7 +143,7 @@ export async function createRequest(userId: string, body: CreateBody): Promise<R
   });
   if (duplicate) {
     if (duplicate.status === "failed") {
-      updateRequest(duplicate.id, { status: "pending", error: null });
+      updateRequest(duplicate.id, { status: "pending", error: null, progress: 0, progressLabel: "Waiting" });
       void processRequest(duplicate.id);
       return getRequest(duplicate.id)!;
     }
@@ -158,7 +179,7 @@ async function createSongRequest(userId: string, body: CreateBody): Promise<Requ
   const duplicate = findOpenRequest({ userId, type: "song", artist, album: song });
   if (duplicate) {
     if (duplicate.status === "failed") {
-      updateRequest(duplicate.id, { status: "pending", error: null });
+      updateRequest(duplicate.id, { status: "pending", error: null, progress: 0, progressLabel: "Waiting" });
       void processRequest(duplicate.id);
       return getRequest(duplicate.id)!;
     }
@@ -262,7 +283,7 @@ export async function processRequest(id: string) {
   try {
     const row = getRequest(id);
     if (!row || row.status === "available") return;
-    updateRequest(id, { status: "processing", error: null });
+    updateRequest(id, { status: "processing", error: null, progress: 5, progressLabel: "Starting" });
     if (row.type === "song") await processSong(row);
     else if (row.type === "album") await processAlbumOrYoutube(row);
     else await processArtist(row);
@@ -271,7 +292,7 @@ export async function processRequest(id: string) {
       error instanceof ServiceError || error instanceof HttpError
         ? error.message
         : "The request could not be sent to Lidarr.";
-    updateRequest(id, { status: "failed", error: message });
+    updateRequest(id, { status: "failed", error: message, progressLabel: "Failed" });
   } finally {
     running.delete(id);
   }
@@ -279,11 +300,19 @@ export async function processRequest(id: string) {
 
 async function processSong(row: RequestRow) {
   if (!row.album) throw new HttpError(400, "A song request needs a title.");
-  await downloadTrack({ artist: row.artist, title: row.album, album: "Singles" });
+  reportProgress(row.id, 8, "Searching YouTube");
+  await downloadTrack({
+    artist: row.artist,
+    title: row.album,
+    album: "Singles",
+    onProgress: (percent) => reportProgress(row.id, 10 + percent * 0.85, `Downloading ${Math.round(percent)}%`),
+  });
   updateRequest(row.id, {
     status: "available",
     availableAt: new Date().toISOString(),
     error: null,
+    progress: 100,
+    progressLabel: "Done",
   });
   void refreshAfterImport();
 }
@@ -296,6 +325,7 @@ async function processAlbumOrYoutube(row: RequestRow) {
     const lidarrMessage = error instanceof Error ? error.message : "Lidarr could not add this album.";
     try {
       const note = await saveAlbumFromYoutube({
+        requestId: row.id,
         artist: row.artist,
         album: row.album || "",
         musicbrainzAlbumId: row.musicbrainz_album_id,
@@ -305,6 +335,8 @@ async function processAlbumOrYoutube(row: RequestRow) {
         status: "available",
         availableAt: new Date().toISOString(),
         error: note,
+        progress: 100,
+        progressLabel: "Done",
       });
       void refreshAfterImport();
     } catch (youtubeError) {
@@ -319,6 +351,7 @@ async function processAlbum(row: RequestRow) {
   if (!row.musicbrainz_artist_id || !row.musicbrainz_album_id) {
     throw new HttpError(400, "This album is missing MusicBrainz ids, so Lidarr cannot add it.");
   }
+  reportProgress(row.id, 15, "Asking Lidarr");
   const artist = await ensureArtist(row.musicbrainz_artist_id, row.artist);
   const albums = await waitForAlbums(artist.id);
   const album = albums.find((item) => item.foreignAlbumId === row.musicbrainz_album_id);
@@ -332,6 +365,8 @@ async function processAlbum(row: RequestRow) {
   await searchAlbums([album.id]);
   updateRequest(row.id, {
     status: "processing",
+    progress: 30,
+    progressLabel: "Waiting for Lidarr",
     lidarrArtistId: artist.id,
     lidarrAlbumId: album.id,
     targetsJson: JSON.stringify([
@@ -349,6 +384,7 @@ async function processArtist(row: RequestRow) {
       "This artist has no MusicBrainz id in Jellyfin, so missing albums cannot be looked up.",
     );
   }
+  reportProgress(row.id, 15, "Asking Lidarr");
   const artist = await ensureArtist(row.musicbrainz_artist_id, row.artist);
   const albums = await waitForAlbums(artist.id);
   const known = albumMbidsInLibrary();
@@ -366,6 +402,8 @@ async function processArtist(row: RequestRow) {
   }));
   updateRequest(row.id, {
     status: "processing",
+    progress: 30,
+    progressLabel: "Waiting for Lidarr",
     artist: artist.artistName || row.artist,
     lidarrArtistId: artist.id,
     targetsJson: JSON.stringify(targets),
@@ -394,6 +432,8 @@ export async function checkRequest(id: string): Promise<boolean> {
         status: "available",
         availableAt: new Date().toISOString(),
         error: notes.length > 0 ? notes.join(" ") : null,
+        progress: 100,
+        progressLabel: "Done",
       });
       void refreshAfterImport();
       return true;
@@ -405,6 +445,8 @@ export async function checkRequest(id: string): Promise<boolean> {
           status: "available",
           availableAt: new Date().toISOString(),
           error: notes.join(" ") || null,
+          progress: 100,
+          progressLabel: "Done",
         });
         void refreshAfterImport();
         return true;
@@ -412,6 +454,7 @@ export async function checkRequest(id: string): Promise<boolean> {
       updateRequest(id, {
         status: "failed",
         error: notes.join(" ") || "Lidarr and YouTube could not get this music.",
+        progressLabel: "Failed",
       });
     }
   } catch (error) {
@@ -437,6 +480,7 @@ async function youtubeFailedTargets(row: RequestRow, targets: AlbumTarget[]): Pr
     if (!failed) continue;
     try {
       const note = await saveAlbumFromYoutube({
+        requestId: row.id,
         artist: row.artist,
         album: target.title,
         musicbrainzAlbumId: target.musicbrainzAlbumId,
@@ -476,11 +520,13 @@ async function trackList(input: {
 }
 
 async function saveAlbumFromYoutube(input: {
+  requestId?: string;
   artist: string;
   album: string;
   musicbrainzAlbumId?: string | null;
   lidarrAlbumId?: number | null;
 }): Promise<string | null> {
+  if (input.requestId) reportProgress(input.requestId, 40, "Looking up tracks");
   const tracks = (await trackList(input)).slice(0, 40);
   if (tracks.length === 0) {
     throw new ServiceError(
@@ -490,13 +536,24 @@ async function saveAlbumFromYoutube(input: {
   }
   const failures: string[] = [];
   let saved = 0;
-  for (const track of tracks) {
+  for (let index = 0; index < tracks.length; index += 1) {
+    const track = tracks[index];
+    const span = 55 / tracks.length;
+    const base = 40 + index * span;
     try {
       await downloadTrack({
         artist: input.artist,
         title: track.title,
         album: input.album,
         position: track.position,
+        onProgress: (percent) => {
+          if (!input.requestId) return;
+          reportProgress(
+            input.requestId,
+            base + (percent / 100) * span,
+            `Downloading ${track.title}`,
+          );
+        },
       });
       saved += 1;
     } catch (error) {
@@ -608,7 +665,7 @@ function coverUrl(album: LidarrAlbum): string | null {
 export async function retryRequest(id: string) {
   const row = getRequest(id);
   if (!row) throw new HttpError(404, "Request not found.");
-  updateRequest(id, { status: "pending", error: null });
+  updateRequest(id, { status: "pending", error: null, progress: 0, progressLabel: "Waiting" });
   void processRequest(id);
   return getRequest(id)!;
 }

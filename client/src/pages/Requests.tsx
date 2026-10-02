@@ -23,6 +23,10 @@ export function RequestsPage({ scope }: { scope: "mine" | "all" }) {
 
   useEffect(() => {
     void load();
+    const timer = window.setInterval(() => {
+      void load();
+    }, 2000);
+    return () => window.clearInterval(timer);
   }, [scope]);
 
   async function retry(id: string) {
@@ -84,6 +88,16 @@ export function RequestsPage({ scope }: { scope: "mine" | "all" }) {
                   {requestSubtitle(request)}
                   {scope === "all" ? ` · ${request.requester}` : ""}
                 </p>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-surface-2">
+                  <div
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${requestPercent(request)}%`,
+                      background: request.status === "failed" ? "var(--danger)" : "var(--primary)",
+                    }}
+                  />
+                </div>
+                <p className="mt-1 text-xs text-muted">{request.progressLabel || request.status}</p>
                 {request.error && (
                   <p className="mt-2 text-sm" style={{ color: "var(--danger)" }}>
                     {request.error}
@@ -104,6 +118,14 @@ export function RequestsPage({ scope }: { scope: "mine" | "all" }) {
       </ul>
     </div>
   );
+}
+
+function requestPercent(request: MusicRequest) {
+  if (request.status === "available") return 100;
+  if (typeof request.progress === "number" && request.progress > 0) return request.progress;
+  if (request.status === "pending") return 8;
+  if (request.status === "processing") return 20;
+  return 0;
 }
 
 function requestTitle(request: MusicRequest) {
