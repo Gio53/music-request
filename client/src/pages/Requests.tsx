@@ -79,11 +79,9 @@ export function RequestsPage({ scope }: { scope: "mine" | "all" }) {
           <li key={request.id}>
             <Card className="flex flex-wrap items-center justify-between gap-4 p-4">
               <div>
-                <p className="font-semibold">
-                  {request.type === "album" ? request.album : request.artist}
-                </p>
+                <p className="font-semibold">{requestTitle(request)}</p>
                 <p className="text-sm text-muted">
-                  {request.type === "album" ? request.artist : "All missing albums"}
+                  {requestSubtitle(request)}
                   {scope === "all" ? ` · ${request.requester}` : ""}
                 </p>
                 {request.error && (
@@ -106,4 +104,15 @@ export function RequestsPage({ scope }: { scope: "mine" | "all" }) {
       </ul>
     </div>
   );
+}
+
+function requestTitle(request: MusicRequest) {
+  if (request.type === "artist") return request.artist;
+  return request.album || request.artist;
+}
+
+function requestSubtitle(request: MusicRequest) {
+  if (request.type === "song") return `${request.artist} · Song from YouTube`;
+  if (request.type === "album") return request.artist;
+  return "All missing albums";
 }

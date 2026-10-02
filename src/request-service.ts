@@ -16,6 +16,7 @@ import {
 import { HttpError, ServiceError } from "./errors";
 import { fetchItem, refreshJellyfinLibrary, syncLibrary } from "./jellyfin";
 import {
+  albumGrabFailed,
   albumHasFiles,
   albumImported,
   ensureArtist,
@@ -23,14 +24,20 @@ import {
   monitorAlbums,
   searchAlbums,
   searchLidarr,
+  tracksForAlbum,
   waitForAlbums,
   type LidarrAlbum,
 } from "./lidarr";
+import { recordingsForAlbum, recordingsForReleaseGroup, type TrackTitle } from "./musicbrainz";
+import { downloadTrack } from "./youtube";
 
 export type AlbumTarget = {
   musicbrainzAlbumId: string;
   title: string;
   lidarrAlbumId: number;
+  saved?: boolean;
+  youtube?: boolean;
+  youtubeError?: string;
 };
 
 const running = new Set<string>();
@@ -67,7 +74,7 @@ function parseTargets(raw: string | null): AlbumTarget[] {
 }
 
 export type CreateBody = {
-  type?: "album" | "artist";
+  type?: "album" | "artist" | "song";
   jellyfinAlbumId?: string;
   jellyfinArtistId?: string;
   musicbrainzAlbumId?: string;
@@ -76,13 +83,15 @@ export type CreateBody = {
   lidarrArtistId?: number;
   artist?: string;
   album?: string;
+  song?: string;
 };
 
 export async function createRequest(userId: string, body: CreateBody): Promise<RequestRow> {
   const type = body.type;
-  if (type !== "album" && type !== "artist") {
-    throw new HttpError(400, 'Request type must be "album" or "artist".');
+  if (type !== "album" && type !== "artist" && type !== "song") {
+    throw new HttpError(400, 'Request type must be "album", "artist", or "song".');
   }
+  if (type === "song") return createSongRequest(userId, body);
 
   const resolved = await resolveIdentity(body);
   if (type === "album") {
@@ -132,6 +141,41 @@ export async function createRequest(userId: string, body: CreateBody): Promise<R
     musicbrainzArtistId: resolved.musicbrainzArtistId,
     lidarrAlbumId: body.lidarrAlbumId && body.lidarrAlbumId > 0 ? body.lidarrAlbumId : null,
     lidarrArtistId: body.lidarrArtistId && body.lidarrArtistId > 0 ? body.lidarrArtistId : null,
+  });
+  void processRequest(row.id);
+  return row;
+}
+
+async function createSongRequest(userId: string, body: CreateBody): Promise<RequestRow> {
+  const artist = body.artist?.trim() || "";
+  const song = (body.song || body.album)?.trim() || "";
+  if (artist.length < 1 || song.length < 1) {
+    throw new HttpError(400, "A song request needs an artist and a song title.");
+  }
+  if (artist.length > 200 || song.length > 200) {
+    throw new HttpError(400, "The artist or song title is too long.");
+  }
+  const duplicate = findOpenRequest({ userId, type: "song", artist, album: song });
+  if (duplicate) {
+    if (duplicate.status === "failed") {
+      updateRequest(duplicate.id, { status: "pending", error: null });
+      void processRequest(duplicate.id);
+      return getRequest(duplicate.id)!;
+    }
+    return duplicate;
+  }
+  const row = insertRequest({
+    id: crypto.randomUUID(),
+    type: "song",
+    userId,
+    artist,
+    album: song,
+    jellyfinAlbumId: null,
+    jellyfinArtistId: null,
+    musicbrainzAlbumId: null,
+    musicbrainzArtistId: null,
+    lidarrAlbumId: null,
+    lidarrArtistId: null,
   });
   void processRequest(row.id);
   return row;
@@ -219,7 +263,8 @@ export async function processRequest(id: string) {
     const row = getRequest(id);
     if (!row || row.status === "available") return;
     updateRequest(id, { status: "processing", error: null });
-    if (row.type === "album") await processAlbum(row);
+    if (row.type === "song") await processSong(row);
+    else if (row.type === "album") await processAlbumOrYoutube(row);
     else await processArtist(row);
   } catch (error) {
     const message =
@@ -229,6 +274,44 @@ export async function processRequest(id: string) {
     updateRequest(id, { status: "failed", error: message });
   } finally {
     running.delete(id);
+  }
+}
+
+async function processSong(row: RequestRow) {
+  if (!row.album) throw new HttpError(400, "A song request needs a title.");
+  await downloadTrack({ artist: row.artist, title: row.album, album: "Singles" });
+  updateRequest(row.id, {
+    status: "available",
+    availableAt: new Date().toISOString(),
+    error: null,
+  });
+  void refreshAfterImport();
+}
+
+async function processAlbumOrYoutube(row: RequestRow) {
+  try {
+    await processAlbum(row);
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 409) throw error;
+    const lidarrMessage = error instanceof Error ? error.message : "Lidarr could not add this album.";
+    try {
+      const note = await saveAlbumFromYoutube({
+        artist: row.artist,
+        album: row.album || "",
+        musicbrainzAlbumId: row.musicbrainz_album_id,
+        lidarrAlbumId: row.lidarr_album_id,
+      });
+      updateRequest(row.id, {
+        status: "available",
+        availableAt: new Date().toISOString(),
+        error: note,
+      });
+      void refreshAfterImport();
+    } catch (youtubeError) {
+      const youtubeMessage =
+        youtubeError instanceof Error ? youtubeError.message : "YouTube fallback failed.";
+      throw new ServiceError("youtube", `${lidarrMessage} YouTube fallback: ${youtubeMessage}`);
+    }
   }
 }
 
@@ -296,14 +379,40 @@ export async function checkRequest(id: string): Promise<boolean> {
   if (!row || row.status === "available" || row.status === "failed" || row.status === "pending") {
     return false;
   }
-  const targets = parseTargets(row.targets_json);
+  let targets = parseTargets(row.targets_json);
   if (targets.length === 0) return false;
   try {
+    const withYoutube = await youtubeFailedTargets(row, targets);
+    if (JSON.stringify(withYoutube) !== JSON.stringify(targets)) {
+      targets = withYoutube;
+      updateRequest(id, { targetsJson: JSON.stringify(targets) });
+    }
     const ready = await Promise.all(targets.map((target) => targetIsAvailable(target)));
     if (ready.every(Boolean)) {
-      updateRequest(id, { status: "available", availableAt: new Date().toISOString(), error: null });
+      const notes = targets.map((target) => target.youtubeError).filter(Boolean);
+      updateRequest(id, {
+        status: "available",
+        availableAt: new Date().toISOString(),
+        error: notes.length > 0 ? notes.join(" ") : null,
+      });
       void refreshAfterImport();
       return true;
+    }
+    if (targets.every((target) => target.youtube || target.saved)) {
+      const notes = targets.map((target) => target.youtubeError).filter(Boolean);
+      if (ready.some(Boolean)) {
+        updateRequest(id, {
+          status: "available",
+          availableAt: new Date().toISOString(),
+          error: notes.join(" ") || null,
+        });
+        void refreshAfterImport();
+        return true;
+      }
+      updateRequest(id, {
+        status: "failed",
+        error: notes.join(" ") || "Lidarr and YouTube could not get this music.",
+      });
     }
   } catch (error) {
     if (error instanceof ServiceError) {
@@ -315,7 +424,94 @@ export async function checkRequest(id: string): Promise<boolean> {
   return false;
 }
 
+async function youtubeFailedTargets(row: RequestRow, targets: AlbumTarget[]): Promise<AlbumTarget[]> {
+  const next = targets.map((target) => ({ ...target }));
+  for (const target of next) {
+    if (target.saved || target.youtube || !target.lidarrAlbumId) continue;
+    let failed = false;
+    try {
+      failed = albumGrabFailed(await historyForAlbum(target.lidarrAlbumId));
+    } catch {
+      continue;
+    }
+    if (!failed) continue;
+    try {
+      const note = await saveAlbumFromYoutube({
+        artist: row.artist,
+        album: target.title,
+        musicbrainzAlbumId: target.musicbrainzAlbumId,
+        lidarrAlbumId: target.lidarrAlbumId,
+      });
+      target.saved = true;
+      target.youtube = true;
+      if (note) target.youtubeError = note;
+    } catch (error) {
+      target.youtube = true;
+      target.youtubeError = error instanceof Error ? error.message : "YouTube fallback failed.";
+    }
+  }
+  return next;
+}
+
+async function trackList(input: {
+  artist: string;
+  album: string;
+  musicbrainzAlbumId?: string | null;
+  lidarrAlbumId?: number | null;
+}): Promise<TrackTitle[]> {
+  if (input.lidarrAlbumId && input.lidarrAlbumId > 0) {
+    const tracks = await tracksForAlbum(input.lidarrAlbumId);
+    if (tracks.length > 0) return tracks;
+  }
+  if (input.musicbrainzAlbumId) {
+    try {
+      const tracks = await recordingsForReleaseGroup(input.musicbrainzAlbumId);
+      if (tracks.length > 0) return tracks;
+    } catch {
+      /* Search by name next. */
+    }
+  }
+  if (!input.artist || !input.album) return [];
+  return recordingsForAlbum(input.artist, input.album);
+}
+
+async function saveAlbumFromYoutube(input: {
+  artist: string;
+  album: string;
+  musicbrainzAlbumId?: string | null;
+  lidarrAlbumId?: number | null;
+}): Promise<string | null> {
+  const tracks = (await trackList(input)).slice(0, 40);
+  if (tracks.length === 0) {
+    throw new ServiceError(
+      "youtube",
+      `No track list was found for "${input.album}" by ${input.artist}, so YouTube was not used.`,
+    );
+  }
+  const failures: string[] = [];
+  let saved = 0;
+  for (const track of tracks) {
+    try {
+      await downloadTrack({
+        artist: input.artist,
+        title: track.title,
+        album: input.album,
+        position: track.position,
+      });
+      saved += 1;
+    } catch (error) {
+      failures.push(`${track.title}: ${error instanceof Error ? error.message : "failed"}`);
+    }
+  }
+  if (saved === 0) {
+    throw new ServiceError("youtube", failures.slice(0, 2).join(" ") || "YouTube did not return those songs.");
+  }
+  if (failures.length === 0) return null;
+  return `Saved ${saved} of ${tracks.length} songs from YouTube. ${failures.slice(0, 2).join(" ")}`;
+}
+
 async function targetIsAvailable(target: AlbumTarget): Promise<boolean> {
+  if (target.saved) return true;
   if (target.lidarrAlbumId > 0 && (await albumHasFiles(target.lidarrAlbumId))) return true;
   if (target.lidarrAlbumId > 0) {
     const events = await historyForAlbum(target.lidarrAlbumId);

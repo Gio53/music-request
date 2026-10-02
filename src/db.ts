@@ -36,7 +36,7 @@ export type RequestStatus = "pending" | "processing" | "available" | "failed";
 
 export type RequestRow = {
   id: string;
-  type: "album" | "artist";
+  type: "album" | "artist" | "song";
   user_id: string;
   artist: string;
   album: string | null;
@@ -340,7 +340,7 @@ export function artistInLibrary(musicbrainzArtistId: string): boolean {
 
 export type RequestInput = {
   id: string;
-  type: "album" | "artist";
+  type: "album" | "artist" | "song";
   userId: string;
   artist: string;
   album: string | null;
@@ -403,9 +403,15 @@ export function listRequests(userId?: string): RequestRow[] {
     .all() as RequestRow[];
 }
 
+function sameText(left?: string | null, right?: string | null): boolean {
+  return (left || "").trim().toLowerCase() === (right || "").trim().toLowerCase();
+}
+
 export function findOpenRequest(input: {
   userId: string;
-  type: "album" | "artist";
+  type: "album" | "artist" | "song";
+  artist?: string | null;
+  album?: string | null;
   musicbrainzAlbumId?: string | null;
   musicbrainzArtistId?: string | null;
   jellyfinAlbumId?: string | null;
@@ -414,6 +420,9 @@ export function findOpenRequest(input: {
   const rows = listRequests(input.userId).filter((row) => row.type === input.type);
   return (
     rows.find((row) => {
+      if (input.type === "song") {
+        return sameText(row.artist, input.artist) && sameText(row.album, input.album);
+      }
       if (input.type === "album") {
         return (
           (input.musicbrainzAlbumId && row.musicbrainz_album_id === input.musicbrainzAlbumId) ||

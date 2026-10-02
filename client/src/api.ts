@@ -36,7 +36,7 @@ export type LibraryFolder = { id: string; name: string; path: string | null; ena
 
 export type MusicRequest = {
   id: string;
-  type: "album" | "artist";
+  type: "album" | "artist" | "song";
   artist: string;
   album: string | null;
   status: "pending" | "processing" | "available" | "failed";

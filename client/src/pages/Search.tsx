@@ -79,7 +79,11 @@ export function SearchPage() {
   return (
     <div>
       <h1 className="text-3xl font-bold">Search</h1>
-      <p className="mt-2 text-muted">Find an artist or album through Lidarr and MusicBrainz, then request it.</p>
+      <p className="mt-2 text-muted">
+        Find an artist or album through Lidarr. Albums go to Lidarr first. If Lidarr fails, the songs are
+        taken from YouTube. A single song always comes from YouTube.
+      </p>
+      <SongRequestForm />
       <form className="mt-6 flex flex-wrap items-end gap-3" onSubmit={submit}>
         <div className="min-w-[16rem] flex-1">
           <TextField label="Artist or album" value={term} onChange={(event) => setTerm(event.target.value)} />
@@ -153,6 +157,57 @@ export function SearchPage() {
         </section>
       )}
     </div>
+  );
+}
+
+function SongRequestForm() {
+  const [artist, setArtist] = useState("");
+  const [song, setSong] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+    setBusy(true);
+    try {
+      await api("/api/requests", {
+        method: "POST",
+        body: JSON.stringify({ type: "song", artist: artist.trim(), song: song.trim() }),
+      });
+      setMessage(`Requested “${song.trim()}”. YouTube download has started.`);
+      setSong("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not request that song.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="mt-6" onSubmit={submit}>
+      <Card className="space-y-4 p-4">
+        <div>
+          <h2 className="text-lg font-semibold">Request a song</h2>
+          <p className="text-sm text-muted">Downloads that song from YouTube into your music folder.</p>
+        </div>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[12rem] flex-1">
+            <TextField label="Artist" value={artist} onChange={(event) => setArtist(event.target.value)} />
+          </div>
+          <div className="min-w-[12rem] flex-1">
+            <TextField label="Song" value={song} onChange={(event) => setSong(event.target.value)} />
+          </div>
+          <Button disabled={busy || artist.trim().length < 1 || song.trim().length < 1} type="submit" variant="accent">
+            {busy ? "Requesting…" : "Request song"}
+          </Button>
+        </div>
+        {error && <Alert>{error}</Alert>}
+        {message && <p className="text-sm text-muted">{message}</p>}
+      </Card>
+    </form>
   );
 }
 

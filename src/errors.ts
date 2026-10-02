@@ -10,7 +10,7 @@ export class HttpError extends Error {
 
 export class ServiceError extends HttpError {
   constructor(
-    public service: "jellyfin" | "lidarr",
+    public service: "jellyfin" | "lidarr" | "youtube",
     message: string,
     status = 502,
   ) {

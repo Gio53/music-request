@@ -16,6 +16,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 FROM node:22-alpine
+RUN apk add --no-cache ca-certificates curl ffmpeg python3 \
+ && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+ && chmod a+rx /usr/local/bin/yt-dlp
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=5656

@@ -28,6 +28,14 @@ Settings, including the Jellyfin password and Lidarr API key, are stored in the 
 
 The server listens on port **5656**. `GET /api/health` returns `{ "ok": true }`.
 
+YouTube song downloads are written into `DOWNLOAD_DIR` (default `/music` in Docker). Mount the same host folder Lidarr uses:
+
+```bash
+MUSIC_HOST_PATH=/path/to/your/music docker compose up -d --build
+```
+
+New files are added under `Artist/Album/` or `Artist/Singles/`. Files that are already there are left as they are.
+
 ## Sign in
 
 After setup, everyone signs in with their Jellyfin username and password. Jellyfin administrators are administrators here. Admins see every request and the Settings page. Other people only see their own requests.
@@ -40,7 +48,9 @@ Jellyfin 12.1 rejects the old `X-Emby-Token` header. Music Request sends:
 
 - **Library** shows artists and albums already in the synced Jellyfin libraries. Albums there say “Already in library”. An artist page can request the albums Lidarr knows about that are still missing.
 - **Search** looks up artists and albums through Lidarr (MusicBrainz). Request an album, or request every missing album by an artist.
-- A single song is not a request. Lidarr adds whole albums. Searching a song title can still find the album.
+- **Request a song** on the Search page downloads that song from YouTube with yt-dlp. It does not go through Lidarr.
+- An album still goes to Lidarr first. If Lidarr cannot add it, or a Lidarr download fails, Music Request looks up the track list and downloads those songs from YouTube.
+- Requesting a whole artist does not pull the discography from YouTube. Request the album or the song you want.
 
 Requests move from pending to processing while Lidarr searches, then to available after Lidarr’s history shows the album was imported. That also triggers a Jellyfin library scan. Admins can retry a failed request from All Requests.
 

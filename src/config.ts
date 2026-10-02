@@ -7,3 +7,4 @@ export const CLIENT_NAME = "MusicRequest";
 export const CLIENT_VERSION = "1.0";
 export const SESSION_COOKIE = "mr_session";
 export const SESSION_DAYS = 14;
+export const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || "";

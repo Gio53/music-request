@@ -278,6 +278,32 @@ export async function historyForAlbum(albumId: number): Promise<LidarrHistoryEve
   return page.records || [];
 }
 
+export async function tracksForAlbum(
+  albumId: number,
+): Promise<Array<{ title: string; position: number }>> {
+  if (!albumId) return [];
+  const { url, apiKey } = configured();
+  try {
+    const tracks = await lidarrJson<
+      Array<{ title?: string; trackNumber?: string; absoluteTrackNumber?: number }>
+    >(url, apiKey, `/api/v1/track?albumId=${albumId}`);
+    return tracks
+      .map((track, index) => ({
+        title: (track.title || "").trim(),
+        position: Number(track.absoluteTrackNumber || track.trackNumber || index + 1) || index + 1,
+      }))
+      .filter((track) => track.title);
+  } catch {
+    return [];
+  }
+}
+
+export function albumGrabFailed(events: LidarrHistoryEvent[]): boolean {
+  if (events.length === 0) return false;
+  const latest = [...events].sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0];
+  return (latest.eventType || "").toLowerCase().includes("fail");
+}
+
 export function albumImported(events: LidarrHistoryEvent[]): boolean {
   return events.some((event) => {
     const type = (event.eventType || "").toLowerCase();
